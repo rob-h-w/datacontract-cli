@@ -209,23 +209,20 @@ def connect_ibis(
 
 
 def _connect_databricks(ibis, server: Server, run: Run):
-    """Connect to Databricks SQL directly, selecting the auth method from env vars.
-
-    Auth is resolved in priority order, so an existing token-based setup keeps
-    working unchanged:
-
-    1. personal access token (``DATACONTRACT_DATABRICKS_TOKEN``) — the default
-    2. OAuth machine-to-machine / service principal, from
-       ``DATACONTRACT_DATABRICKS_CLIENT_ID`` + ``DATACONTRACT_DATABRICKS_CLIENT_SECRET``
-       (the usual choice for CI/CD)
-    3. a local Databricks config profile (``DATACONTRACT_DATABRICKS_PROFILE``),
-       delegating to the Databricks SDK's unified auth (also covers Azure CLI/MSI)
-    4. an explicit connector ``auth_type`` (``DATACONTRACT_DATABRICKS_AUTH_TYPE``),
-       e.g. ``databricks-oauth`` for the interactive user-to-machine browser flow
-
-    The OAuth credential providers build their SDK ``Config`` lazily, so token
-    exchange happens when the connection is opened rather than while reading env.
+    """Connect to Databricks using a volume-creation-free backend subclass.
+    The standard ibis Databricks backend unconditionally runs
+    CREATE VOLUME ... during _post_connect() so it can store memtable data.
+    datacontract-cli never creates memtables at runtime, so this step both
+    requires unnecessary VOLUME CREATE privileges and serves no purpose.
+    We avoid it by subclassing the ibis Databricks Backend and making
+    _post_connect a no-op. All other backend functionality (query compilation,
+    schema introspection, SQL execution) is entirely unaffected.
     """
+    from ibis.backends.databricks import Backend as _DatabricksBackend
+    class _NoVolumeBackend(_DatabricksBackend):
+        """Databricks ibis backend that skips CREATE VOLUME on connect."""
+        def _post_connect(self, *, memtable_volume) -> None:
+            pass  # No CREATE VOLUME - not needed for read-only contract checks.
     host = server.host or require_env("DATACONTRACT_DATABRICKS_SERVER_HOSTNAME", server_type="databricks")
     kwargs = dict(
         server_hostname=host,
@@ -233,38 +230,32 @@ def _connect_databricks(ibis, server: Server, run: Run):
         catalog=server.catalog,
         schema=server.schema_,
     )
-
+    backend = _NoVolumeBackend()
     token = os.getenv("DATACONTRACT_DATABRICKS_TOKEN")
     client_id = os.getenv("DATACONTRACT_DATABRICKS_CLIENT_ID")
     client_secret = os.getenv("DATACONTRACT_DATABRICKS_CLIENT_SECRET")
     profile = os.getenv("DATACONTRACT_DATABRICKS_PROFILE")
     auth_type = os.getenv("DATACONTRACT_DATABRICKS_AUTH_TYPE")
-
     if token:
         run.log_info("Connecting to databricks with a personal access token")
-        return ibis.databricks.connect(access_token=token, **kwargs)
-
+        return backend.connect(access_token=token, **kwargs)
     if client_id and client_secret:
         run.log_info("Connecting to databricks with an OAuth service principal (M2M)")
         sdk_host = host if host.startswith("http") else f"https://{host}"
         kwargs["credentials_provider"] = _databricks_credentials_provider(
             host=sdk_host, client_id=client_id, client_secret=client_secret
         )
-        return ibis.databricks.connect(**kwargs)
-
+        return backend.connect(**kwargs)
     if profile:
         run.log_info(f"Connecting to databricks with config profile '{profile}'")
         kwargs["credentials_provider"] = _databricks_credentials_provider(profile=profile)
-        return ibis.databricks.connect(**kwargs)
-
+        return backend.connect(**kwargs)
     if auth_type:
         run.log_info(f"Connecting to databricks with auth_type '{auth_type}'")
-        return ibis.databricks.connect(auth_type=auth_type, **kwargs)
-
+        return backend.connect(auth_type=auth_type, **kwargs)
     # Nothing configured: fail with the same clear message as before.
     token = require_env("DATACONTRACT_DATABRICKS_TOKEN", server_type="databricks")
-    return ibis.databricks.connect(access_token=token, **kwargs)
-
+    return backend.connect(access_token=token, **kwargs)
 
 def _databricks_credentials_provider(**config_kwargs):
     """Return a ``credentials_provider`` callable for the Databricks SQL connector.

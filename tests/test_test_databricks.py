@@ -15,7 +15,7 @@ datacontract = "fixtures/databricks-sql/datacontract.yaml"
 load_dotenv(override=True)
 
 
-def test_nested_struct_sql_quality_is_enabled_for_databricks_only():
+def test_nested_struct_and_array_checks_are_enabled_for_databricks():
     contract = """
 apiVersion: v3.0.2
 kind: DataContract
@@ -47,12 +47,17 @@ schema:
 
     checks = create_checks(odcs, Server(type="databricks"))
 
+    # Nested struct SQL quality check is resolved against the parent model
     nested_sql = next(c for c in checks if c.type == "field_quality_sql")
     assert nested_sql.field == "customer.email"
     assert nested_sql.metric == MetricType.CUSTOM_SQL
     assert nested_sql.model == "orders"
     assert "customer.email" in (nested_sql.query or "")
-    assert not any(c.model == "orders__discounts" for c in checks)
+
+    # Array items are recursed via CTE virtual models (no CREATE TABLE/VIEW)
+    assert any(c.model == "orders__discounts" for c in checks), (
+        "Expected checks against orders__discounts virtual model for Databricks"
+    )
 
 
 @pytest.mark.skipif(

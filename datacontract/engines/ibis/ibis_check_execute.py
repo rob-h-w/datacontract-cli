@@ -894,6 +894,14 @@ def _resolve_table(con, model: str):
     try:
         return con.table(model)
     except Exception:
+        virtual_queries = getattr(con, "_dc_virtual_model_queries", None)
+        if isinstance(virtual_queries, dict):
+            query = virtual_queries.get(model)
+            if query is None:
+                match = next((name for name in virtual_queries if name.lower() == model.lower()), None)
+                query = virtual_queries.get(match) if match else None
+            if query:
+                return con.sql(query)
         try:
             available = con.list_tables()
         except Exception:
